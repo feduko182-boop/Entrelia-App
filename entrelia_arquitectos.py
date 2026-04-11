@@ -1,83 +1,150 @@
 import streamlit as st
+import pandas as pd
+import sqlite3
+from datetime import datetime
+import plotly.express as px
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="ENTRELIA - Control de Obra", layout="centered")
+# --- 1. CONFIGURACIÓN Y BASE DE DATOS ---
+st.set_page_config(page_title="ENTRELIA v1.8", layout="wide")
+DB_NAME = 'entrelia_master.db'
 
-# --- ESTILO ---
-st.markdown("""
-    <style>
-    .stHeader { background-color: #1E90FF; padding: 10px; border-radius: 10px; color: white; text-align: center; }
-    .card { background-color: #161b22; padding: 20px; border-radius: 15px; border-left: 5px solid #1E90FF; margin-bottom: 20px; }
-    </style>
-    """, unsafe_allow_html=True)
+def crear_conexion():
+    return sqlite3.connect(DB_NAME)
 
-# --- TÍTULO ---
-st.markdown("<div class='stHeader'><h1>ENTRELIA 🏗️</h1><p>Gestión de Rentabilidad para Arquitectos</p></div>", unsafe_allow_html=True)
-st.write("")
+def consultar(sql):
+    conn = crear_conexion()
+    try:
+        df = pd.read_sql(sql, conn)
+    except:
+        df = pd.DataFrame()
+    finally:
+        conn.close()
+    return df
 
-# --- 1. PERFIL DEL PROYECTO ---
-with st.container():
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    col1, col2 = st.columns(2)
-    with col1:
-        obra = st.text_input("Nombre de la Obra", value="Residencial Playa")
-    with col2:
-        presupuesto_total = st.number_input("Presupuesto Total (MXN)", value=500000, step=1000)
-    st.markdown('</div>', unsafe_allow_html=True)
+def inicializar_db():
+    conn = crear_conexion()
+    c = conn.cursor()
+    c.execute('CREATE TABLE IF NOT EXISTS obras (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT, ubicacion TEXT)')
+    c.execute('CREATE TABLE IF NOT EXISTS plan_cuentas (id INTEGER PRIMARY KEY AUTOINCREMENT, rubro TEXT)')
+    c.execute('''CREATE TABLE IF NOT EXISTS movimientos 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, obra_id INTEGER, 
+                  cuenta_id INTEGER, proveedor TEXT, detalle TEXT, monto REAL, 
+                  unidad TEXT, tipo_pago TEXT)''')
+    conn.commit()
+    conn.close()
 
-# --- 2. BASE DE DATOS DE MATERIALES (SIMULADA) ---
-# Aquí es donde después conectaremos con las ferreterías de Quintana Roo
-materiales_db = {
-    "Cemento Gris (Saco 50kg)": 240.0,
-    "Varilla 3/8 (Tramo)": 185.0,
-    "Arena (m3)": 450.0,
-    "Grava (m3)": 520.0,
-    "Pintura Blanca (Cubeta)": 2100.0
-}
+inicializar_db()
 
-# --- 3. REGISTRO DE COMPRAS ---
-st.subheader("📝 Registro de Insumos")
+# --- 2. INTERFAZ LATERAL ---
+st.sidebar.title("🏗️ ENTRELIA")
+menu = st.sidebar.radio("Ir a:", ["📊 Dashboard", "📝 Registrar Gasto", "🏗️ Obras", "⚙️ Configuración"])
 
-if 'gastos' not in st.session_state:
-    st.session_state.gastos = []
+# --- 3. SECCIONES ---
 
-with st.form("registro_gasto"):
-    col_mat, col_cant = st.columns([2, 1])
-    with col_mat:
-        mat_sel = st.selectbox("Material / Insumo", list(materiales_db.keys()))
-    with col_cant:
-        cantidad = st.number_input("Cantidad", min_value=1, value=1)
+if menu == "📊 Dashboard":
+    st.header("📊 Resumen de Inversión")
+    query = """
+        SELECT m.fecha, o.nombre as Obra, p.rubro as Categoria, m.monto, m.proveedor, m.detalle
+        FROM movimientos m
+        JOIN obras o ON m.obra_id = o.id
+        JOIN plan_cuentas p ON m.cuenta_id = p.id
+    """
+    df_master = consultar(query)
+    if not df_master.empty:
+        c1, c2 = st.columns(2)
+        c1.metric("Gasto Total", f"${df_master['monto'].sum():,.2f}")
+        c2.metric("Obras Activas", df_master['Obra'].nunique())
+        st.plotly_chart(px.pie(df_master, values='monto', names='Obra', title="Inversión por Obra"))
+        st.dataframe(df_master, use_container_width=True)
+    else:
+        st.info("Aún no hay movimientos registrados.")
+
+elif menu == "🏗️ Obras":
+    st.header("🏗️ Gestión de Proyectos")
+    with st.form("nueva_obra"):
+        n = st.text_input("Nombre de la Obra")
+        u = st.text_input("Ubicación")
+        if st.form_submit_button("Crear Obra"):
+            if n:
+                conn = crear_conexion()
+                conn.execute("INSERT INTO obras (nombre, ubicacion) VALUES (?,?)", (n, u))
+                conn.commit()
+                conn.close()
+                st.success(f"Obra {n} creada!")
+                st.rerun()
+    st.subheader("Obras Actuales")
+    st.dataframe(consultar("SELECT * FROM obras"), use_container_width=True)
+
+elif menu == "📝 Registrar Gasto":
+    st.header("📝 Nuevo Movimiento de Caja")
+    df_o = consultar("SELECT * FROM obras")
+    df_p = consultar("SELECT * FROM plan_cuentas")
     
-    boton_agregar = st.form_submit_button("Añadir a la Obra")
-    
-    if boton_agregar:
-        precio_u = materiales_db[mat_sel]
-        total_item = precio_u * cantidad
-        st.session_state.gastos.append({"Material": mat_sel, "Cant": cantidad, "Total": total_item})
+    if df_o.empty or df_p.empty:
+        st.warning("⚠️ Cargá una Obra y Rubros primero.")
+    else:
+        with st.form("form_gasto", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                f = st.date_input("Fecha", datetime.now())
+                o = st.selectbox("Obra", df_o['nombre'].tolist())
+                p = st.text_input("Proveedor")
+                m = st.number_input("Monto ($)", min_value=0.0)
+            with col2:
+                r = st.selectbox("Rubro", df_p['rubro'].tolist())
+                unid = st.selectbox("Unidad", ["Unidad", "MTS", "KG", "LTS", "VIAJE"])
+                pago = st.selectbox("Método", ["Efectivo", "Transferencia"])
+                d = st.text_area("Detalle")
+            
+            if st.form_submit_button("🔨 Guardar Gasto"):
+                id_o = int(df_o[df_o['nombre'] == o]['id'].iloc[0])
+                id_p = int(df_p[df_p['rubro'] == r]['id'].iloc[0])
+                conn = crear_conexion()
+                conn.execute("""INSERT INTO movimientos (fecha, obra_id, cuenta_id, proveedor, detalle, monto, unidad, tipo_pago) 
+                             VALUES (?,?,?,?,?,?,?,?)""",
+                             (f.strftime("%Y-%m-%d"), id_o, id_p, p, d, m, unid, pago))
+                conn.commit()
+                conn.close()
+                st.success("¡Gasto guardado!")
 
-# --- 4. DASHBOARD DE RENTABILIDAD (EL CORAZÓN DEL PLAN) ---
-st.divider()
-total_gastado = sum(item['Total'] for item in st.session_state.gastos)
-diferencia = presupuesto_total - total_gastado
-porcentaje_uso = (total_gastado / presupuesto_total) * 100
+elif menu == "⚙️ Configuración":
+    st.header("⚙️ Cargar Rubros (Excel)")
+    arch = st.file_uploader("Subí el Excel de Papá", type=["xlsx"])
+    if arch:
+        columna_encontrada = None
+        df_final = None
+        palabras_clave = ['rubro', 'cuenta', 'concepto', 'descripcion', 'item', 'nombre']
 
-st.subheader("📊 Estado de Rentabilidad")
-c1, c2, c3 = st.columns(3)
-c1.metric("Gastado", f"${total_gastado:,.2f}")
-c2.metric("Disponible", f"${diferencia:,.2f}")
-c3.metric("Uso del Presupuesto", f"{porcentaje_uso:.1f}%")
+        # Intentamos buscar los encabezados en las primeras 10 filas
+        for i in range(11):
+            try:
+                df_temp = pd.read_excel(arch, header=i)
+                # Buscamos si alguna columna coincide con nuestras palabras clave
+                match = [c for c in df_temp.columns if any(p in str(c).lower() for p in palabras_clave)]
+                if match:
+                    columna_encontrada = match[0]
+                    df_final = df_temp
+                    break
+            except:
+                continue
 
-if porcentaje_uso > 90:
-    st.warning("⚠️ ¡Cuidado! Estás llegando al límite del presupuesto.")
-elif total_gastado > 0:
-    st.success("✅ La obra mantiene un margen de utilidad saludable.")
-
-# --- 5. DETALLE DE GASTOS ---
-if st.session_state.gastos:
-    with st.expander("Ver desglose de gastos"):
-        st.table(st.session_state.gastos)
-        if st.button("Limpiar Registro"):
-            st.session_state.gastos = []
-            st.rerun()
-
-st.info("💡 Próxima función: Conexión con ferreterías locales para cotización en tiempo real.")
+        if columna_encontrada:
+            st.success(f"✅ ¡Por fin! Encontré la columna: '{columna_encontrada}'")
+            if st.button("🚀 Sincronizar"):
+                # Limpiamos los datos: quitamos vacíos y duplicados
+                df_c = df_final[[columna_encontrada]].dropna().drop_duplicates()
+                df_c.columns = ['rubro']
+                
+                # Guardamos en la base de datos
+                conn = crear_conexion()
+                conn.execute("DELETE FROM plan_cuentas")
+                df_c.to_sql('plan_cuentas', conn, if_exists='append', index=False)
+                conn.close()
+                st.success("¡Rubros cargados y listos para usar!")
+                st.rerun()
+        else:
+            # Si después de 10 filas no hay nada, te muestro qué vio en la última para ayudar
+            st.error("No encontré la columna de Rubros en ninguna de las primeras 10 filas.")
+            df_error = pd.read_excel(arch, header=0)
+            st.write("Columnas detectadas al principio:", list(df_error.columns))
+            st.info("Sugerencia: Abrí el Excel y fijate que la columna tenga un nombre claro como 'Rubro'.")
