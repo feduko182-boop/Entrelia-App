@@ -1,0 +1,7 @@
+streamlit
+pandas
+plotly
+openpyxl
+st-gsheets-connection
+google-generativeai>=0.7.0
+Pillow
