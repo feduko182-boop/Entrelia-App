@@ -1,7 +1,0 @@
-streamlit
-pandas
-plotly
-openpyxl
-st-gsheets-connection
-google-generativeai
-Pillow
